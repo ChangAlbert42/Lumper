@@ -199,7 +199,7 @@ sub exportIssues {
 
 	my $issues = $self->sendRequestToYouTrack(	
 			Request => '/api/issues?'.
-										'query=project:%20'.$arg{Project}.'%20&'.
+										'query=project:%20'.$arg{Project}.'%20'.@arg{SearchQuery}.'&'. # Add the capability to add search query string
 										'$top='.$max.'&'.
 										'fields='.
 											'id,'.

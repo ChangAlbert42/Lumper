@@ -15,6 +15,8 @@ use IPC::Run qw( run );
 use Date::Format;
 use Encode;
 
+use Time::HiRes qw(usleep gettimeofday tv_interval);
+
 # Used to display column-like output
 my $display = display->new(); 
 
@@ -41,7 +43,7 @@ unless ($yt) {
 
 my $jira = jira->new(	Url         => $JiraUrl,
                     	Login       => $JiraLogin,
-                      	Password    => $JiraPassword,
+                      	Password    => $JiraToken,
                       	Verbose     => $verbose,
                       	Project     => $JiraProject,
 		      		 	CookieFile => $cookieFile,
@@ -55,7 +57,7 @@ print "Success\n";
 
 $display->printTitle("Getting YouTrack Issues");
 
-my $export = $yt->exportIssues(Project => $YTProject, Max => $maxissues);
+my $export = $yt->exportIssues(Project => $YTProject, SearchQuery => $YTQueryUrl, Max => $maxissues);
 print "Exported issues: ".scalar @{$export}."\n";
 
 # Find active users from issues, commetns and other YT activity
@@ -79,9 +81,10 @@ my $check = check->new(
 	YouTrack => $yt,
 	Url => $JiraUrl,
 	JiraLogin => $JiraLogin,
-	Passwords => \%JiraPasswords,
+	Passwords => \%JiraTokens,
 	RealUsers =>  \%users,
 	Users => \%User,
+	JiraId => \%JiraId,
 	TypeFieldName => $typeCustomFieldName,
 	Types => \%Type,
 	Links => \%IssueLinks,
@@ -108,6 +111,9 @@ unless ($notest) {
 
 	&ifProceed;
 }
+
+$display->printTitle("Starting Timer");
+my $startTime = [gettimeofday];
 
 my $issuesCount = 0;
 
@@ -147,7 +153,6 @@ foreach my $issue (sort { $a->{numberInProject} <=> $b->{numberInProject} } @{$e
 		$header .= "]\n";
 	}
 
-
 	# Convert Markdown to Jira-specific rich text formatting
 	my $description = convertUserMentions($issue->{description});
 	$description = convertAttachmentsLinks($description, $attachmentFileNamesMapping);
@@ -158,10 +163,12 @@ foreach my $issue (sort { $a->{numberInProject} <=> $b->{numberInProject} } @{$e
 		$description = convertMarkdownToJira($description);
 	}
 	
+	# In Jira Cloud, the user ID is required now instead of just a name
+	# Only users with an account are allowed to be reporters
 	my %import = ( project => { key => $JiraProject },
 	               issuetype => { name => $Type{$issue->{$typeCustomFieldName}} || $issue->{$typeCustomFieldName} },
                    assignee => { name => $User{$issue->{Assignee}} || $issue->{Assignee} },
-                   reporter => { name => $User{$issue->{reporter}->{login}} || $issue->{reporter}->{login} },
+                   reporter => { id => $JiraId{$User{$issue->{reporter}->{login}}} }, 
                    summary => $issue->{summary},
                    description => $header.$description,
                    priority => { name => $Priority{$issue->{Priority}} || $issue->{Priority} || 'Medium' }
@@ -174,6 +181,9 @@ foreach my $issue (sort { $a->{numberInProject} <=> $b->{numberInProject} } @{$e
 			$custom{$CustomFields{$field}} = $issue->{$field};
 		}
 	}
+	# Display the name of the reporter from the YouTrack issue in the Jira 
+	# custom field Original Reporter
+	$custom{"Original Reporter"} = $OriginalUser{$issue->{reporter}->{login}};	
 
 	# Epic Name special field is required for Jira Epic issues type
 	if ($import{issuetype}->{name} == 'Epic') {
@@ -241,7 +251,9 @@ foreach my $issue (sort { $a->{numberInProject} <=> $b->{numberInProject} } @{$e
 
 	# Create comments
 	print "\nCreating comments\n";
-	foreach my $comment (@{$issue->{comments}}) {
+	# Comments were being shown from newest to oldest. Added reverse so
+	# comment list would display from oldest to newest.
+	foreach my $comment (reverse(@{$issue->{comments}})) {
 		my $author = $User{$comment->{author}->{login}} || $comment->{author}->{login};
 		my $date = scalar localtime ($comment->{created}/1000);
 
@@ -258,12 +270,13 @@ foreach my $issue (sort { $a->{numberInProject} <=> $b->{numberInProject} } @{$e
 		}
 
 		my $header;
-		if ( $JiraPasswords{$author} ) {
+		if ( $JiraTokens{$author} ) {
 			$header = "[ $date ]\n";
 			$text = $header.$text;
-			my $jiraComment = $jira->createComment(IssueKey => $key, Body => $text, Login => $author, Password => $JiraPasswords{$author}) || warn "Error creating comment";
+			my $jiraComment = $jira->createComment(IssueKey => $key, Body => $text, Login => $author, Password => $JiraTokens{$author}) || warn "Error creating comment";
 		} else {
-			$header = "[ ".$comment->{author}->{login}." $date ]\n";
+			my $commentAuthor = $OriginalUser{$comment->{author}->{login}} || $comment->{author}->{login}; # Displays the full name of the original author instead of an account abbreviation
+			$header = "[ ".$commentAuthor." $date ]\n";
 			$text = $header.$text;
 			my $jiraComment = $jira->createComment(IssueKey => $key, Body => $text) || warn "Error creating comment";
 		}
@@ -284,14 +297,14 @@ foreach my $issue (sort { $a->{numberInProject} <=> $b->{numberInProject} } @{$e
 				timeSpentSeconds => $workLog->{duration}->{minutes} * 60
 			);
 
-			if ( defined $JiraPasswords{$User{ $workLog->{author}->{login} }} ) {
+			if ( defined $JiraTokens{$User{ $workLog->{author}->{login} }} ) {
 				$jira->addWorkLog(Key => $key, 
 								WorkLog => \%jiraWorkLog, 
 								Login => $User{ $workLog->{author}->{login} }, 
-								Password => $JiraPasswords{$User{ $workLog->{author}->{login} }}) 
+								Password => $JiraTokens{$User{ $workLog->{author}->{login} }}) 
 					|| warn "\nError creating work log";
 			} else {
-				my $originalAuthor = "[ Original Author: ".$workLog->{author}->{login}." ]\n";
+				my $originalAuthor = "[ Original Author: ".$OriginalUser{$workLog->{author}->{login}}." ]\n"; # Displays the full name of the original author instead of an account abbreviation
 				$jiraWorkLog{comment} = $originalAuthor."".$jiraWorkLog{comment};
 				$jira->addWorkLog(Key => $key, WorkLog => \%jiraWorkLog) 
 					|| warn "\nError creating work log";
@@ -318,6 +331,9 @@ foreach my $issue (sort { $a->{numberInProject} <=> $b->{numberInProject} } @{$e
 		}
 	}
 }
+
+my $issueMigrationTime = tv_interval($startTime);
+my $issueLinkStart = [gettimeofday];
 
 # Create Issue Links
 if ($exportLinks eq 'true') {	
@@ -373,6 +389,16 @@ if ($exportLinks eq 'true') {
 	}
 }
 
+my $issueLinkFinish = tv_interval($issueLinkStart);
+my $totalTime = tv_interval($startTime);
+
+$display->printTitle("Stopping Timer");
+
+$display->printTitle("Timer Statistics");
+$display->printElapsedTime("\nYouTrack to Jira Migration Time: ", $issueMigrationTime);
+$display->printElapsedTime("Issue Link Time: ", $issueLinkFinish);
+$display->printElapsedTime("Total Elapsed Migration Time: ", $totalTime);
+
 $display->printTitle("ENJOY :)");
 
 sub ifProceed {
@@ -398,7 +424,13 @@ sub convertUserMentions {
 	my $textToConvert = shift;
 
 	# Convert user @foo mentions to Jira [~foo] links
-	$textToConvert =~ s/\B\@(\S+)/\[\~$User{$1}\]/g;
+	if ( $JiraTokens{$1} ) {
+		$textToConvert =~ s/\B\@(\S+)/\[\~$User{$1}\]/g;
+	} else {
+		# If we do not have the user credentials display 
+		# the users name instead of a failed link
+		$textToConvert =~ s/\B\@(\S+)/\[$OriginalUser{$1}\]/g;
+	}
 
 	return $textToConvert;
 }
