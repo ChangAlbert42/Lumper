@@ -1,4 +1,4 @@
-All credit goes to the original developer agapoff for developing this great tool with amazing comments to navigate the code base easily! Original repo found here: https://github.com/agapoff/Lumper
+All credit goes to the original developer agapoff for developing this great tool with amazing comments to navigate the code base easily! Made minor edits for changes to Jira API and personal use (migration from YouTrack to Jira Cloud). Original repo found here: https://github.com/agapoff/Lumper
 
 # Lumper
 The tool for migration from YouTrack to Jira: easy and for free
